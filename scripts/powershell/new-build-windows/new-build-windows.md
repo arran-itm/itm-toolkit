@@ -1,9 +1,19 @@
 ## Automated Provisioning Script
 
-Most of the Windows Setup steps above are wrapped in `scripts/powershell/new-build-windows.ps1`. Run it from an elevated PowerShell on the `itm` local admin account once Windows install is complete and the device is online.
+Most of the Windows Setup steps above are wrapped in `scripts/powershell/new-build-windows.ps1`. Copy the whole `new-build-windows/` folder to `C:\temp\new-build-windows\` (the script resolves `itm-wallpaper.png` and `itm-profile.png` from its own folder via `$PSScriptRoot`), then run it from an elevated PowerShell on the `itm` local admin account once Windows install is complete and the device is online.
 
 ```powershell
+cd C:\temp\new-build-windows
 powershell -ExecutionPolicy Bypass -File .\new-build-windows.ps1
+```
+
+Expected folder contents:
+
+```
+C:\temp\new-build-windows\
+  new-build-windows.ps1
+  itm-wallpaper.png   # set as desktop background for itm
+  itm-profile.png     # set as itm's account picture (resized to 32/40/48/96/192/240/448)
 ```
 
 Optional parameters:
@@ -18,9 +28,27 @@ Optional parameters:
     - `O365ProPlusEEANoTeamsRetail` → Apps for Enterprise / E3 / E5 in the EEA
   A wrong Product ID can cause the install to hang or silently fail to activate.
 - `-OfficeTimeoutMinutes <n>` — default 90. Office step kills itself and reports the log tail if it exceeds this.
-- `-SkipWindowsUpdate` — useful on a second pass after reboot.
-- `-SkipOffice` — skip the ODT install (e.g. re-running after a failure).
 - `-WindowsUpdateTimeoutMinutes <n>` — default 120, raise for slow lines.
+- `-Only <steps>` — run only the listed step numbers. e.g. `-Only 10` to just re-apply the profile picture, or `-Only 9,10` for wallpaper + picture. Every other step is recorded as SKIPPED.
+- `-Skip <steps>` — skip the listed step numbers. e.g. `-Skip 4,6` to skip Windows Update and Office on a re-run. `-Only` takes precedence: anything listed in `-Only` always runs, even if also in `-Skip`.
+
+> **Spaces in step lists**: when launching via `powershell -File`, the CLI splits unquoted args on whitespace. Use `-Only 9,10` (no spaces) or quote the list — otherwise only the first number is bound to `-Only` and the rest leak into the next positional parameter. The script logs the parsed lists on start-up so you can verify (look for `-Only parsed as: [...]`).
+
+Step numbers:
+
+| # | Step |
+|---|------|
+| 1 | Set power plan to never sleep on AC |
+| 2 | Remove Microsoft consumer bloatware |
+| 3 | Remove OEM bloatware (Dell/HP/Lenovo/Samsung) |
+| 4 | Install Windows updates (including drivers) |
+| 5 | Download and install NinjaRMM agent |
+| 6 | Install Microsoft 365 Apps for Business via ODT |
+| 7 | Install Chrome and Adobe Acrobat Reader via winget |
+| 8 | Pin core apps to taskbar |
+| 9 | Set desktop wallpaper from `itm-wallpaper.png` |
+| 10 | Set itm user account picture from `itm-profile.png` |
+| 11 | Clean temp files from installation |
 
 ### Getting the URLs before you start
 Grab both of these before you run the script (both are prompted interactively if not passed):
@@ -37,10 +65,12 @@ Grab both of these before you run the script (both are prompted interactively if
 6. Installs Microsoft 365 Apps for Business (Word, Excel, PowerPoint, Outlook classic, Teams, OneDrive) via the Office Deployment Tool.
 7. Installs Google Chrome and Adobe Acrobat Reader via `winget`.
 8. Writes a `TaskbarLayoutModification` XML and applies it via Explorer policy so Chrome, Outlook, Word, Excel, PowerPoint, Teams and Acrobat are pinned for new users.
-9. Clears temp files from the installation.
+9. Copies `itm-wallpaper.png` to `C:\Windows\Web\Wallpaper\itm\` and sets it as the desktop background for the current (itm) user via `HKCU\Control Panel\Desktop` + `SystemParametersInfo(SPI_SETDESKWALLPAPER)`.
+10. Resizes `itm-profile.png` to the standard account-tile sizes (32/40/48/96/192/240/448), writes them to `C:\Users\Public\AccountPictures\<itm-SID>\`, points `HKLM\...\AccountPicture\Users\<SID>` at them, and clears `C:\Users\itm\AppData\Roaming\Microsoft\Windows\AccountPictures\*.accountpicture-ms` so the cached tile is invalidated. Note: per Microsoft Learn, `UserInformation.SetAccountPictureAsync` is deprecated and `Windows.System.User` has no setter, so there is no first-party API — the registry path is the supported route. **Sign out and back in as itm for the new tile to render** on Start / sign-in screen.
+11. Clears temp files from the installation.
 
 ### What still has to be done by hand
-- Reboot and re-run the script with `-SkipOffice` to pick up any remaining Windows Updates.
+- Reboot and re-run the script with `-Skip 6` to pick up any remaining Windows Updates without re-installing Office.
 - Run the OEM driver update tool (HP Support Assistant, Dell Command Update, Lenovo Vantage) while it still exists — the script removes it afterwards, so do this **before** the driver-update pass if you want to use it.
 - Enrol the device in Ninja (verify it has checked in after the agent install).
 - Sign the user into Office / Teams to activate the licence.

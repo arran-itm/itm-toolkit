@@ -9,7 +9,9 @@
     agent from a prompted URL, installs Microsoft 365 Apps for Business
     (Word, Excel, PowerPoint, Outlook classic, OneDrive, Teams), Chrome
     and Adobe Acrobat Reader, pins the core apps to the taskbar, adjusts
-    power settings so the device never sleeps on AC, and cleans temp files.
+    power settings so the device never sleeps on AC, applies the itm
+    desktop wallpaper and account picture from PNGs bundled alongside
+    this script, and cleans temp files.
 
 .NOTES
     Run from an elevated PowerShell prompt on the local "itm" admin account
@@ -32,10 +34,12 @@ param(
     [string]$OfficeProductId = "O365BusinessRetail",
     [ValidateRange(10, 240)]
     [int]$OfficeTimeoutMinutes = 90,
-    [switch]$SkipWindowsUpdate,
-    [switch]$SkipOffice,
     [ValidateRange(5, 240)]
-    [int]$WindowsUpdateTimeoutMinutes = 120
+    [int]$WindowsUpdateTimeoutMinutes = 120,
+    # Run only these step numbers (e.g. -Only 10 or -Only 9,10). Empty = run all.
+    [int[]]$Only,
+    # Skip these step numbers (e.g. -Skip 4,6). Ignored for any step listed in -Only.
+    [int[]]$Skip
 )
 
 Set-StrictMode -Version Latest
@@ -47,6 +51,11 @@ $reportFile = "new-build-{0}.txt" -f (Get-Date -Format "ddMMyyyy-HHmm")
 $reportPath = Join-Path $reportDir $reportFile
 $transcriptStarted = $false
 $workDir = Join-Path $env:TEMP "itm-build"
+
+# Script-bundled assets (copied alongside this .ps1, e.g. C:\temp\new-build-windows\)
+$assetsDir = $PSScriptRoot
+$wallpaperSource = Join-Path $assetsDir "itm-wallpaper.png"
+$profilePicSource = Join-Path $assetsDir "itm-profile.png"
 
 try {
     if (-not (Test-Path -LiteralPath $reportDir)) {
@@ -117,6 +126,30 @@ function Invoke-Step {
     )
 
     $label = "Step $Number"
+
+    if ($Only -and ($Only.Count -gt 0) -and ($Only -notcontains $Number)) {
+        $stepResults.Add([pscustomobject]@{
+                Step     = $Number
+                Name     = $Name
+                Status   = "SKIPPED"
+                Duration = 0
+                Detail   = "Not in -Only list"
+            }) | Out-Null
+        Write-Log -Message "$label ($Name) skipped - not in -Only list."
+        return
+    }
+    if ($Skip -and ($Skip -contains $Number)) {
+        $stepResults.Add([pscustomobject]@{
+                Step     = $Number
+                Name     = $Name
+                Status   = "SKIPPED"
+                Duration = 0
+                Detail   = "Listed in -Skip"
+            }) | Out-Null
+        Write-Log -Message "$label ($Name) skipped via -Skip."
+        return
+    }
+
     $started = Get-Date
     Write-Log -Level STEP -Message "${label}: $Name"
 
@@ -506,11 +539,6 @@ Invoke-Step -Number 3 -Name "Remove OEM bloatware (Dell/HP/Lenovo/Samsung)" -Act
 }
 
 Invoke-Step -Number 4 -Name "Install Windows updates (including drivers)" -Action {
-    if ($SkipWindowsUpdate) {
-        Write-Log -Message "Skipping Windows Update because -SkipWindowsUpdate was provided."
-        return
-    }
-
     if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
         Write-Log -Message "Installing PSWindowsUpdate module (NuGet provider may be required)..."
         try {
@@ -595,11 +623,6 @@ Invoke-Step -Number 5 -Name "Download and install NinjaRMM agent" -Action {
 }
 
 Invoke-Step -Number 6 -Name "Install Microsoft 365 Apps for Business via ODT" -Action {
-    if ($SkipOffice) {
-        Write-Log -Message "Skipping Office install because -SkipOffice was provided."
-        return
-    }
-
     # Pre-flight: Office needs ~5.5 GB of scratch space during install.
     # Fail fast with a clear message instead of hanging for 45 min and then logging
     # PipelineInsufficientDiskSpace deep in the ODT logs.
@@ -609,7 +632,7 @@ Invoke-Step -Number 6 -Name "Install Microsoft 365 Apps for Business via ODT" -A
         Write-Log -Level WARN -Message "Could not determine free space on C:. Proceeding anyway."
     }
     elseif ($freeMB -lt $requiredMB) {
-        throw "Insufficient disk space on C: to install Office. Required: ${requiredMB} MB (8 GB), Free: ${freeMB} MB. Free up space (clear Downloads, run Disk Cleanup, or expand the VM disk) and re-run with -SkipWindowsUpdate."
+        throw "Insufficient disk space on C: to install Office. Required: ${requiredMB} MB (8 GB), Free: ${freeMB} MB. Free up space (clear Downloads, run Disk Cleanup, or expand the VM disk) and re-run with -Skip 4 to skip Windows Update."
     }
     else {
         Write-Log -Message "Disk space check passed: ${freeMB} MB free on C: (need ${requiredMB} MB)."
@@ -721,7 +744,7 @@ Invoke-Step -Number 6 -Name "Install Microsoft 365 Apps for Business via ODT" -A
             $currentFree = Get-FreeSpaceMB -DriveLetter "C"
             Write-Log -Level ERROR -Message "ODT reports PipelineInsufficientDiskSpace. Free on C: = ${currentFree} MB."
             Write-Log -Level ERROR -Message "Log line: $($diskSpaceHit.Line.Trim())"
-            throw "Office install failed: insufficient disk space. Current free on C: = ${currentFree} MB. Office needs ~5.5 GB of scratch space. Clear disk space and re-run with -SkipWindowsUpdate."
+            throw "Office install failed: insufficient disk space. Current free on C: = ${currentFree} MB. Office needs ~5.5 GB of scratch space. Clear disk space and re-run with -Skip 4 to skip Windows Update."
         }
 
         $latestLog = $candidateLogs | Select-Object -First 1
@@ -819,7 +842,173 @@ Invoke-Step -Number 8 -Name "Pin core apps to taskbar (via policy XML)" -Action 
     Write-Log -Level WARN -Message "Windows 11 only applies this layout to new users - existing profiles (incl. 'itm') may need to re-pin manually."
 }
 
-Invoke-Step -Number 9 -Name "Clean temp files from installation" -Action {
+Invoke-Step -Number 9 -Name "Set desktop wallpaper from itm-wallpaper.png" -Action {
+    if (-not (Test-Path -LiteralPath $wallpaperSource)) {
+        throw "Wallpaper source not found at '$wallpaperSource'. Ensure itm-wallpaper.png is copied alongside the script."
+    }
+
+    $wallpaperDestDir = "C:\Windows\Web\Wallpaper\itm"
+    if (-not (Test-Path -LiteralPath $wallpaperDestDir)) {
+        New-Item -ItemType Directory -Path $wallpaperDestDir -Force | Out-Null
+    }
+    $wallpaperDest = Join-Path $wallpaperDestDir "itm-wallpaper.png"
+    Copy-Item -LiteralPath $wallpaperSource -Destination $wallpaperDest -Force
+    Write-Log -Message "Copied wallpaper to $wallpaperDest"
+
+    $desktopKey = "HKCU:\Control Panel\Desktop"
+    Set-ItemProperty -Path $desktopKey -Name "Wallpaper" -Value $wallpaperDest -Type String
+    Set-ItemProperty -Path $desktopKey -Name "WallpaperStyle" -Value "10" -Type String  # 10 = Fill
+    Set-ItemProperty -Path $desktopKey -Name "TileWallpaper" -Value "0" -Type String
+
+    if (-not ("ItmWallpaperRefresh" -as [type])) {
+        Add-Type @"
+using System.Runtime.InteropServices;
+public class ItmWallpaperRefresh {
+    [DllImport("user32.dll", CharSet=CharSet.Auto)]
+    public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
+}
+"@
+    }
+    $SPI_SETDESKWALLPAPER = 0x0014
+    $SPIF_UPDATEINIFILE = 0x01
+    $SPIF_SENDWININICHANGE = 0x02
+    [ItmWallpaperRefresh]::SystemParametersInfo(
+        $SPI_SETDESKWALLPAPER, 0, $wallpaperDest,
+        ($SPIF_UPDATEINIFILE -bor $SPIF_SENDWININICHANGE)) | Out-Null
+
+    Write-Log -Message "Wallpaper applied for current user (itm)."
+}
+
+Invoke-Step -Number 10 -Name "Set itm user account picture from itm-profile.png" -Action {
+    # Per Microsoft Learn: Windows.System.UserProfile.UserInformation.SetAccountPictureAsync
+    # is deprecated on Windows 10+ and its replacement Windows.System.User exposes no
+    # SetPictureAsync method, so there is no supported API a provisioning script can call.
+    # Settings > Accounts writes to HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\
+    # AccountPicture\Users\<SID> pointing at PNGs sized 32/40/48/96/192/240/448; this step
+    # reproduces that and invalidates the per-user tile cache so the change actually shows.
+
+    if (-not (Test-Path -LiteralPath $profilePicSource)) {
+        throw "Profile picture source not found at '$profilePicSource'. Ensure itm-profile.png is copied alongside the script."
+    }
+
+    $srcInfo = Get-Item -LiteralPath $profilePicSource
+    Write-Log -Message "Source: $($srcInfo.FullName) ($([math]::Round($srcInfo.Length / 1KB, 1)) KB, last modified $($srcInfo.LastWriteTime))"
+
+    Add-Type -AssemblyName System.Drawing
+    $source = $null
+    try {
+        $source = [System.Drawing.Image]::FromFile($profilePicSource)
+    }
+    catch {
+        throw "Could not load '$profilePicSource' as an image: $($_.Exception.Message). Confirm it's a valid PNG."
+    }
+    Write-Log -Message "Loaded source image: $($source.Width)x$($source.Height), pixel format $($source.PixelFormat), raw format $($source.RawFormat.Guid)"
+
+    $itmUser = Get-LocalUser -Name "itm" -ErrorAction SilentlyContinue
+    if (-not $itmUser) {
+        $source.Dispose()
+        throw "Local user 'itm' not found (Get-LocalUser returned nothing). Cannot assign profile picture."
+    }
+    $sid = $itmUser.SID.Value
+    Write-Log -Message "Resolved itm user: Name='$($itmUser.Name)', Enabled=$($itmUser.Enabled), SID='$sid'"
+
+    $destDir = "C:\Users\Public\AccountPictures\$sid"
+    if (Test-Path -LiteralPath $destDir) {
+        Write-Log -Message "Destination dir already exists: $destDir (will overwrite)"
+    }
+    else {
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+        Write-Log -Message "Created destination dir: $destDir"
+    }
+
+    $sizes = @(32, 40, 48, 96, 192, 240, 448)
+    $writtenPaths = [ordered]@{}
+    try {
+        foreach ($size in $sizes) {
+            $outPath = Join-Path $destDir "Image$size.png"
+            $bitmap = New-Object System.Drawing.Bitmap $size, $size
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            try {
+                $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+                $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+                $graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+                $graphics.Clear([System.Drawing.Color]::Transparent)
+                $graphics.DrawImage($source, 0, 0, $size, $size)
+            }
+            finally {
+                $graphics.Dispose()
+            }
+            $bitmap.Save($outPath, [System.Drawing.Imaging.ImageFormat]::Png)
+            $bitmap.Dispose()
+
+            $bytesOnDisk = (Get-Item -LiteralPath $outPath).Length
+            Write-Log -Message "  wrote $outPath ($bytesOnDisk bytes)"
+            $writtenPaths["Image$size"] = $outPath
+        }
+    }
+    finally {
+        $source.Dispose()
+    }
+
+    $regKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AccountPicture\Users\$sid"
+    if (Test-Path -LiteralPath $regKey) {
+        Write-Log -Message "Registry key exists: $regKey"
+    }
+    else {
+        New-Item -Path $regKey -Force | Out-Null
+        Write-Log -Message "Created registry key: $regKey"
+    }
+
+    foreach ($entry in $writtenPaths.GetEnumerator()) {
+        Set-ItemProperty -Path $regKey -Name $entry.Key -Value $entry.Value -Type String -Force
+        Write-Log -Message "  set $($entry.Key) = $($entry.Value)"
+    }
+
+    Write-Log -Message "Verifying registry values were written correctly..."
+    $verifyOk = $true
+    foreach ($name in $writtenPaths.Keys) {
+        $expected = $writtenPaths[$name]
+        $actual = (Get-ItemProperty -Path $regKey -Name $name -ErrorAction SilentlyContinue).$name
+        if ($actual -ne $expected) {
+            $verifyOk = $false
+            Write-Log -Level WARN -Message "  MISMATCH ${name}: expected '$expected' got '$actual'"
+        }
+        else {
+            Write-Log -Message "  ok       $name = $actual"
+        }
+    }
+    if (-not $verifyOk) {
+        Write-Log -Level WARN -Message "One or more registry values did not match expected path. Check permissions on $regKey."
+    }
+
+    # Clear the per-user tile cache. Windows re-reads HKLM on fresh sign-in, but the
+    # current session renders from this cache and will keep showing the old tile until
+    # these files are gone.
+    $itmCacheDir = "C:\Users\itm\AppData\Roaming\Microsoft\Windows\AccountPictures"
+    if (Test-Path -LiteralPath $itmCacheDir) {
+        $cached = @(Get-ChildItem -LiteralPath $itmCacheDir -Filter "*.accountpicture-ms" -ErrorAction SilentlyContinue)
+        if ($cached.Count -eq 0) {
+            Write-Log -Message "Tile cache dir present but empty: $itmCacheDir"
+        }
+        foreach ($c in $cached) {
+            try {
+                Remove-Item -LiteralPath $c.FullName -Force -ErrorAction Stop
+                Write-Log -Message "  cleared cached tile $($c.Name) ($($c.Length) bytes)"
+            }
+            catch {
+                Write-Log -Level WARN -Message "  could not remove '$($c.FullName)': $($_.Exception.Message)"
+            }
+        }
+    }
+    else {
+        Write-Log -Message "Tile cache dir does not exist yet (expected on a fresh profile): $itmCacheDir"
+    }
+
+    Write-Log -Message "Profile picture step complete. Sign out and back in as itm - the new tile takes effect on next sign-in."
+}
+
+Invoke-Step -Number 11 -Name "Clean temp files from installation" -Action {
     $paths = @(
         "C:\Windows\Temp",
         $env:TEMP,
@@ -846,25 +1035,27 @@ Write-Host "========== New Build Summary ==========" -ForegroundColor Cyan
 
 $orderedResults = $stepResults | Sort-Object Step
 foreach ($result in $orderedResults) {
-    if ($result.Status -eq "SUCCESS") {
-        Write-Host ("Step {0} ({1}): SUCCESS" -f $result.Step, $result.Name) -ForegroundColor Green
-    }
-    else {
-        Write-Host ("Step {0} ({1}): FAILED" -f $result.Step, $result.Name) -ForegroundColor Red
-        Write-Host ("  Reason: {0}" -f $result.Detail) -ForegroundColor DarkYellow
+    switch ($result.Status) {
+        "SUCCESS" { Write-Host ("Step {0} ({1}): SUCCESS" -f $result.Step, $result.Name) -ForegroundColor Green }
+        "SKIPPED" { Write-Host ("Step {0} ({1}): SKIPPED ({2})" -f $result.Step, $result.Name, $result.Detail) -ForegroundColor DarkGray }
+        default {
+            Write-Host ("Step {0} ({1}): FAILED" -f $result.Step, $result.Name) -ForegroundColor Red
+            Write-Host ("  Reason: {0}" -f $result.Detail) -ForegroundColor DarkYellow
+        }
     }
 }
 
 $successCount = @($orderedResults | Where-Object { $_.Status -eq "SUCCESS" }).Count
 $failedCount = @($orderedResults | Where-Object { $_.Status -eq "FAILED" }).Count
+$skippedCount = @($orderedResults | Where-Object { $_.Status -eq "SKIPPED" }).Count
 
 Write-Host ""
-Write-Host ("Completed. Success: {0}, Failed: {1}" -f $successCount, $failedCount) -ForegroundColor Cyan
+Write-Host ("Completed. Success: {0}, Failed: {1}, Skipped: {2}" -f $successCount, $failedCount, $skippedCount) -ForegroundColor Cyan
 Write-Host ("Report file: {0}" -f $reportPath) -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host "  1. Reboot the device." -ForegroundColor Gray
-Write-Host "  2. Re-run with -SkipOffice to pick up any remaining Windows Updates after reboot." -ForegroundColor Gray
+Write-Host "  2. Re-run with -Skip 6 to pick up any remaining Windows Updates after reboot (skips Office)." -ForegroundColor Gray
 Write-Host "  3. Sign the user into Office / Teams to activate the licence." -ForegroundColor Gray
 Write-Host "  4. Verify NinjaRMM check-in from the Ninja dashboard." -ForegroundColor Gray
 
